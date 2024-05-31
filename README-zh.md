@@ -1,19 +1,19 @@
-# llama3 implemented from scratch
+# 从头实现 Llama3 模型
 
-in this file, i implemented llama3 from scratch, one tensor and matrix multiplication at a time.
+在这个文件中，我从头实现了 Llama3，其中包含张量和矩阵乘法。
 <br>
-also, im going to load tensors directly from the model file that meta provided for llama3, you need to download the weights before running this file.
-here is the offical link to download the weights: https://llama.meta.com/llama-downloads/
+此外，我将直接从 Meta 提供的 Llama3 模型文件中加载张量，在运行此文件之前，您需要下载权重。
+这是官方链接： https://llama.meta.com/llama-downloads/
 
 <div>
     <img src="images/archi.png"/>
 </div>
 
-## tokenizer
+## 分词器
 
-im not going to implement a bpe tokenizer (but andrej karpathy has a really clean implementation)
+我不会实现一个 BPE 分词器（但 Andrej Karpathy 也有一个非常简洁的实现）
 <br>
-link to his implementation: https://github.com/karpathy/minbpe
+这是他的项目地址： https://github.com/karpathy/minbpe
 
 <div>
     <img src="images/karpathyminbpe.png" width="600"/>
@@ -27,6 +27,7 @@ import torch
 import json
 import matplotlib.pyplot as plt
 
+# 加载分词器模型路径
 tokenizer_path = "Meta-Llama-3-8B/tokenizer.model"
 special_tokens = [
             "<|begin_of_text|>",
@@ -48,22 +49,24 @@ tokenizer = tiktoken.Encoding(
     special_tokens={token: len(mergeable_ranks) + i for i, token in enumerate(special_tokens)},
 )
 
+# 测试分词器编码和解码功能
 tokenizer.decode(tokenizer.encode("hello world!"))
 ```
 
     'hello world!'
 
-## reading the model file
+## 读取模型文件
 
-normally, reading this depends on how the model classes are written and the variable names inside them.
+通常，读取模型文件,往往取决于模型类的编写方式以及其中的变量名。
 <br>
-but since we are implementing llama3 from scratch we will read the file one tensor at a time.
+但由于我们要从头实现 Llama3，我们将一次性读取一个张量。
 
 <div>
     <img src="images/model.png" width="600"/>
 </div>
 
 ```python
+# 加载模型权重
 model = torch.load("Meta-Llama-3-8B/consolidated.00.pth")
 print(json.dumps(list(model.keys())[:20], indent=4))
 ```
@@ -92,6 +95,8 @@ print(json.dumps(list(model.keys())[:20], indent=4))
     ]
 
 ```python
+
+# 获取模型配置参数
 with open("Meta-Llama-3-8B/params.json", "r") as f:
     config = json.load(f)
 config
@@ -107,13 +112,14 @@ config
      'norm_eps': 1e-05,
      'rope_theta': 500000.0}
 
-## we use this config to infer details about the model like
+## 使用这些配置推理模型的细节
 
-1. the model has 32 transformer layers
-2. each multi-head attention block has 32 heads
-3. the vocab size and so on
+1. 模型有 32 个 Transformer 层
+2. 每个多头注意力块有 32 个头
+3. 词汇表大小等
 
 ```python
+# 从配置文件中提取模型参数
 dim = config["dim"]
 n_layers = config["n_layers"]
 n_heads = config["n_heads"]
@@ -125,9 +131,9 @@ norm_eps = config["norm_eps"]
 rope_theta = torch.tensor(config["rope_theta"])
 ```
 
-## converting text to tokens
+## 将文本转换为 token
 
-here we use tiktoken (i think an openai library) as the tokenizer
+这里我们使用 tiktoken（我觉得应该是 OpenAI 的库）作为分词器
 
 <div>
     <img src="images/tokens.png" width="600"/>
@@ -135,9 +141,13 @@ here we use tiktoken (i think an openai library) as the tokenizer
 
 ```python
 prompt = "the answer to the ultimate question of life, the universe, and everything is "
+
+# 编码为token
 tokens = [128000] + tokenizer.encode(prompt)
 print(tokens)
 tokens = torch.tensor(tokens)
+
+# 将每个 token 解码为对应的文本
 prompt_split_as_tokens = [tokenizer.decode([token.item()]) for token in tokens]
 print(prompt_split_as_tokens)
 ```
@@ -145,41 +155,48 @@ print(prompt_split_as_tokens)
     [128000, 1820, 4320, 311, 279, 17139, 3488, 315, 2324, 11, 279, 15861, 11, 323, 4395, 374, 220]
     ['<|begin_of_text|>', 'the', ' answer', ' to', ' the', ' ultimate', ' question', ' of', ' life', ',', ' the', ' universe', ',', ' and', ' everything', ' is', ' ']
 
-## converting tokens to their embedding
+## 将 token 转换为其对应的 embedding
 
-IM SORRY but this is the only part of the codebase where i use an inbuilt neural network module
+这里我们使用内置的神经网络模块
 <br>
-anyway, so our [17x1] tokens are now [17x4096], i.e. 17 embeddings (one for each token) of length 4096
+反正, 我们的 [17x1] token 现在是 [17x4096]，即每个 token 的长度为 4096 的 embeddings
 <br>
 <br>
-note: keep track of the shapes, it makes it much easier to understand everything
+注意：跟踪 shapes，这样一切将变得理解更容易
 
 <div>
     <img src="images/embeddings.png" width="600"/>
 </div>
 
 ```python
+
+# 加载嵌入层并复制权重
 embedding_layer = torch.nn.Embedding(vocab_size, dim)
 embedding_layer.weight.data.copy_(model["tok_embeddings.weight"])
+
+# 获取未归一化的 token 嵌入
 token_embeddings_unnormalized = embedding_layer(tokens).to(torch.bfloat16)
 token_embeddings_unnormalized.shape
 ```
 
     torch.Size([17, 4096])
 
-## we then normalize the embedding using rms normalization
+## 接下来我们使用 rms 归一化嵌入
 
-please, note after this step the shapes dont change, the values are just normalized
-<br>
-things to keep in mind, we need a norm_eps (from config) because we dont want to accidently set rms to 0 and divide by 0
-<br>
-here is the formula:
+请注意，经过此步骤后 shapes 不变，只是值被归一化
 
+<br>
+需要注意的是，我们需要一个 norm_eps（来自配置）以避免不小心将 rms 设置为 0 并导致除以 0 的情况
+
+<br>
+这是公式:
 <div>
     <img src="images/rms.png" width="600"/>
 </div>
 
 ```python
+# rms 归一化函数
+
 # def rms_norm(tensor, norm_weights):
 #     rms = (tensor.pow(2).mean(-1, keepdim=True) + norm_eps)**0.5
 #     return tensor * (norm_weights / rms)
@@ -187,28 +204,29 @@ def rms_norm(tensor, norm_weights):
     return (tensor * torch.rsqrt(tensor.pow(2).mean(-1, keepdim=True) + norm_eps)) * norm_weights
 ```
 
-# building the first first layer of the transformer
+# 构建第一个 Transformer 层
 
-### normalization
+### 归一化
 
-you will see me accessing layer.0 from the model dict (this is the first layer)
+我们从模型字典中访问 layer.0（这是第一层）
 <br>
-anyway, so after normalizing our shapes are still [17x4096] same as embedding but normalized
+归一化后 shapes 仍然是 [17x4096]，与嵌入相同但已归一化
 
 <div>
     <img src="images/norm.png" width="600"/>
 </div>
 
 ```python
+# 归一化token嵌入
 token_embeddings = rms_norm(token_embeddings_unnormalized, model["layers.0.attention_norm.weight"])
 token_embeddings.shape
 ```
 
     torch.Size([17, 4096])
 
-### attention implemented from scratch
+### 从头实现注意力机制
 
-let's load the attention heads of the first layer of the transformer
+让我们加载第一个 Transformer 层的注意力头
 
 <div>
     <img src="images/qkv.png" width="600"/>
@@ -216,15 +234,16 @@ let's load the attention heads of the first layer of the transformer
 
 <br>
 
-&gt; when we load the query, key, value and output vectors from the model we notice the shapes to be [4096x4096], [1024x4096], [1024x4096], [4096x4096]
+&gt; 当我们从模型中加载 query，key，value 和 output 向量时，我们注意到 shapes 分别为 [4096x4096]，[1024x4096]，[1024x4096]，[4096x4096]
 <br>
-&gt; at first glance this is weird because ideally we want each q,k,v and o for each head individually
+&gt; 乍一看这有些奇怪，因为在理想情况下我们希望每个头单独拥有各自的 q，k，v 和 o
 <br>
-&gt; the authors of the code bundled them togeather because its easy it helps parallize attention head multiplication.
+&gt; 这里作者将其捆绑在一起，为什么会这样呢? 因为这样有助于并行化注意力头的计算
 <br>
-&gt; im going to unwrap everything...
+&gt; 我将展开所有内容...
 
 ```python
+# 打印第一个层的注意力权重 shapes
 print(
     model["layers.0.attention.wq.weight"].shape,
     model["layers.0.attention.wk.weight"].shape,
@@ -235,13 +254,15 @@ print(
 
     torch.Size([4096, 4096]) torch.Size([1024, 4096]) torch.Size([1024, 4096]) torch.Size([4096, 4096])
 
-### unwrapping query
+### 展开 query
 
-in the next section we will unwrap the queries from multiple attention heads, the resulting shape is [32x128x4096]
+在下一节中，我们将展开多个注意力头的 query，得到的 shapes 为 [32x128x4096]
 <br><br>
-here, 32 is the number of attention heads in llama3, 128 is the size of the query vector and 4096 is the size of the token embedding
+这里的 32 是 Llama3 的注意力头数量，128 是 query 向量的大小，4096 是 token 嵌入的大小
 
 ```python
+# 重塑 query 权重为[头数，头维度，嵌入维度]
+
 q_layer0 = model["layers.0.attention.wq.weight"]
 head_dim = q_layer0.shape[0] // n_heads
 q_layer0 = q_layer0.view(n_heads, head_dim, dim)
@@ -250,9 +271,9 @@ q_layer0.shape
 
     torch.Size([32, 128, 4096])
 
-### im going to implement the first head of the first layer
+### 实现第一层的第一个头
 
-here i access the query weight matrix first head of the first layer, the size of this query weight matrix is [128x4096]
+这里我查询了第一个层的第一个头的 query 权重矩阵，其大小为 [128x4096]
 
 ```python
 q_layer0_head0 = q_layer0[0]
@@ -261,9 +282,9 @@ q_layer0_head0.shape
 
     torch.Size([128, 4096])
 
-### we now multiply the query weights with the token embedding, to recive a query for the token
+### 我们现在将 query 权重与 token 嵌入相乘，以获得每个 token 的 query
 
-here you can see the resulting shape is [17x128], this is because we have 17 tokens and for each token there is a 128 length query.
+这里你可以看到得到的 shape 是 [17x128]，这是因为我们有 17 个 token，每个 token 有一个长度为 128 的 query
 
 <div>
     <img src="images/q_per_token.png" width="600"/>
@@ -276,18 +297,18 @@ q_per_token.shape
 
     torch.Size([17, 128])
 
-## positioning encoding
+## 位置编码
 
-we are now at a stage where we have a query vector for each token in our prompt, but if you think about it -- the indivitually query vector has no idea about the position in the prompt.
+当前，每个 token 都有一个 query 向量，但如果你想一想 -- 其实各个 query 向量并不知道它们在 prompt 中的位置。
 <br><br>
 query: "the answer to the ultimate question of life, the universe, and everything is "
 <br><br>
-in our prompt we have used "the" three times, we need the query vectors of all 3 "the" tokens to have different query vectors (each of size [1x128]) based on their positions in the query. we perform these rotations using RoPE (rotory positional embedding).
+在我们的示例 promp t 中，我们使用了三次 "the"，我们需要根据它们在 prompt 中的位置为每个 "the" token 生成不同的 query 向量（每个长度为 128）。我们可以使用 RoPE（旋转位置编码）来实现这一点。
 <br><br>
 
 ### RoPE
 
-watch this video (this is what i watched) to understand the math.
+来看看这个视频(我就是看的这个)可以理解其中的数据学逻辑。
 https://www.youtube.com/watch?v=o29P0Kpobz0&t=530s
 
 <div>
@@ -301,9 +322,11 @@ q_per_token_split_into_pairs.shape
 
     torch.Size([17, 64, 2])
 
-in the above step, we split the query vectors into pairs, we apply a rotational angle shift to each pair!
+这里我们为 prompt 中每个位置生成了旋转位置编码。可以看到，这些编码是正弦和余弦函数的组合。
+
+在上的步骤里, 我们将 query 向量分成对, 并对每对应用旋转角度移位!
 <br><br>
-we now have a vector of size [17x64x2], this is the 128 length queries split into 64 pairs for each token in the prompt! each of those 64 pairs will be rotated by m\*(theta) where m is the position of the token for which we are rotating the query!
+我们现在有一个大小为 [17x64x2] 的向量，这是针对 prompt 中的每个 token 将 128 个长度的 query 分为 64 对！ 这 64 对中的每一对都将旋转 m\*(theta)，其中 m 是我们旋转查询的标记的位置！
 
 <div>
     <img src="images/qsplit.png" width="600"/>
@@ -365,11 +388,11 @@ plt.show()
 
 ![png](images/implllama3_30_0.png)
 
-### now that we have a complex number (the angle change vector) for every token's query element
+### 现在我们的每个 token 的 query 元素都有一个复数（角度变化向量）
 
-we can convert our queries (the one we split into pairs) as complex numbers and then dot product to rotate the query based on the position
+我们可以将 query（将其拆分成对）转换为复数，然后进行点积以根据位置旋转查询
 <br>
-honeslty this is beautiful to think about :)
+说实话，想想都挺开心 :)
 
 ```python
 q_per_token_as_complex_numbers = torch.view_as_complex(q_per_token_split_into_pairs)
@@ -385,9 +408,9 @@ q_per_token_as_complex_numbers_rotated.shape
 
     torch.Size([17, 64])
 
-### after rotated vector is obtained
+### 得到旋转向量后
 
-we can get back our the queries as pairs by viewing the complex numbers as real numbers again
+我们可以通过再次将复数看作实数来返回成对的 query
 
 ```python
 q_per_token_split_into_pairs_rotated = torch.view_as_real(q_per_token_as_complex_numbers_rotated)
@@ -396,7 +419,7 @@ q_per_token_split_into_pairs_rotated.shape
 
     torch.Size([17, 64, 2])
 
-the rotated pairs are now merged, we now have a new query vector (rotated query vector) that is of the shape [17x128] where 17 is the number of tokens and the 128 is the dim of the query vector
+旋转对现在已合并，我们现在有了一个新的 query 向量（旋转 query 向量），其 shape 为 [17x128]，其中 17 是 token 的数量，128 是 query 向量的维度
 
 ```python
 q_per_token_rotated = q_per_token_split_into_pairs_rotated.view(q_per_token.shape)
@@ -405,18 +428,19 @@ q_per_token_rotated.shape
 
     torch.Size([17, 128])
 
-# keys (almost the same as queries)
+# keys（几乎与 query 一模一样）
 
 <div>
     <img src="images/keys.png" width="600px"/>
 </div>
-im lazy as fuck, so im not going to go through the math for keys, the only things you need to keep in mind are:
+我是个懒鬼，所以不打算详细讲 keys 的数学过程，你只需要记住以下几点：
+
 <br>
-&gt; keys generate key vectors also of dimention 128
+&gt; keys 生成的 key 向量的维度也是 128
 <br>
-&gt; keys have only 1/4th the number of the weights as queries, this is because the weights for keys are shared across 4 heads at a time, to reduce the number of computations need
+&gt;  keys 的权重只有 query 的 1/4，因为 keys 的权重在 4 个头之间共享，以减少计算量
 <br>
-&gt; keys are also rotated to add positional info, just like queries because of the same reasons
+&gt; keys 也像 query 一样被旋转以添加位置信息，其原因相同
 
 ```python
 k_layer0 = model["layers.0.attention.wk.weight"]
@@ -468,21 +492,21 @@ k_per_token_rotated.shape
 
     torch.Size([17, 128])
 
-## at this stage now have both the rotated values of queries and keys, for each token.
+## 现在，我们已经有了每个 token 的旋转后的 query 和 key
 
 <div>
     <img src="images/keys0.png" width="600px"/>
 </div>
-each of the queries and keys are now of shape [17x128].
+现在每个 query 和 key 的 shape 都是 [17x128]。
 
-## in the next step we will multiply the queries and key matrices
+## 接下来，我们将 query 和 key 的矩阵相乘
 
-doing this will give us a score mapping each token with one another
+这样做我们会得到每一个 token 相互映射的分数
 <br>
-this score describes how well each token's query relates to the each tokens's key.
-THIS IS SELF ATTENTION :)
+这个分数描述了每个 token 的 query 与每个 token 的 key 的相关度。
+这就是自注意力 :)
 <br>
-the shape of the attention score matrix (qk_per_token) is [17x17] where 17 is the number of tokens in the prompt
+注意力得分矩阵（qk_per_token）的 shape 是 [17x17]，其中 17 是 prompt 中的 token 数量
 
 <div>
     <img src="images/qkmatmul.png" width="600px"/>
@@ -495,13 +519,13 @@ qk_per_token.shape
 
     torch.Size([17, 17])
 
-# we now have to mask query key scores
+# 我们现在必须屏蔽 QK 分数
 
-during the training process of llama3, the future token qk scores are masked.
+在 llama3 的训练过程中，未来的 token qk 分数被屏蔽。
 <br>
-why? because during training we only learn to predict tokens using past tokens.
+为什么？因为在训练过程中，我们只学习使用过去的 token 来预测 token 。
 <br>
-as a result, during inference we set the future tokens to zero.
+因此，在推理过程中，我们将未来的 token 设置为零。
 
 <div>
     <img src="images/mask.png" width="600px"/>
@@ -564,16 +588,18 @@ display_qk_heatmap(qk_per_token_after_masking_after_softmax)
 
 ![png](images/implllama3_54_0.png)
 
-## values (almost the end of attention)
+## values (注意力机制的最后部分)
 
 <div>
     <img src="images/value.png" width="600px"/>
 </div>
+这些分数（0-1）用于确定每个 token 中使用了多少 value 矩阵
 these scores (0-1) are used to determine how much of value matrix is used per token
 <br>
-&gt; just like keys, value weights are also shared acorss every 4 attention heads (to save computation)
+&gt; 和 key 一样，value 权重也在每 4 个注意力头之间进行共享（以节省计算量）
+
 <br>
-&gt; as a result, the shape of the value weight matrix below is [8x128x4096]
+&gt; 因此，下面的 value 权重矩阵的 shape 为 [8x128x4096]
 
 ```python
 v_layer0 = model["layers.0.attention.wv.weight"]
@@ -592,12 +618,12 @@ v_layer0_head0.shape
 
     torch.Size([128, 4096])
 
-## value vectors
+## value 向量
 
 <div>
     <img src="images/v0.png" width="600px"/>
 </div>
-we now use the value weghts to get the attention values per token, this is of size [17x128] where 17 is the number of tokens in the prompt and 128 is the dim of the value vector per token
+现在使用 value 权重来获取每个 token 的注意力值，其大小为 [17x128]，其中 17 是 prompt 中的 token 数，128 是每个 tokene 的 value 向量的维度
 
 ```python
 v_per_token = torch.matmul(token_embeddings, v_layer0_head0.T)
@@ -606,12 +632,12 @@ v_per_token.shape
 
     torch.Size([17, 128])
 
-## attention
+## 注意力(attention)
 
 <div>
     <img src="images/attention.png" width="600px"/>
 </div>
-the resultant attention vector after multipying with the values per token is of shape [17*128]
+和每个 token 的 value 相乘后得到的注意力向量的 shape 为 [17*128]
 
 ```python
 qkv_attention = torch.matmul(qk_per_token_after_masking_after_softmax, v_per_token)
@@ -620,14 +646,14 @@ qkv_attention.shape
 
     torch.Size([17, 128])
 
-# multi head attention
+# 多头注意力 (multi head attention)
 
 <div>
     <img src="images/heads.png" width="600px"/>
 </div>
-WE NOW HAVE THE ATTENTION VALUE OF THE FIRST LAYER AND FIRST HEAD
+我们现在已经有了第一层和第一个头的注意力值
 <br>
-now im going to run a loop and perform the exact same math as the cells above but for every head in the first layer
+现在我将运行一个循环，并执行与上面单元格中相同的数学运算，但只针对第一层中的每个头
 
 ```python
 qkv_attention_store = []
@@ -667,9 +693,10 @@ len(qkv_attention_store)
 <div>
     <img src="images/stacked.png" width="600px"/>
 </div>
-we now have a the qkv_attention matrix for all 32 heads on the first layer, next im going to merge all attention scores into one large matrix of size [17x4096]
+现在我们有了第一个层的 32 个头的 qkv_attention 矩阵，接下来我将把所有注意力分数合并成一个大矩阵，大小为 [17x4096]
+
 <br>
-we are almost at the end :)
+在坚持一下，我们快要结束了 :)
 
 ```python
 stacked_qkv_attention = torch.cat(qkv_attention_store, dim=-1)
@@ -678,12 +705,12 @@ stacked_qkv_attention.shape
 
     torch.Size([17, 4096])
 
-# weight matrix, one of the final steps
+# 权重矩阵，最后几步之一
 
 <div>
     <img src="images/weightmatrix.png" width="600px"/>
 </div>
-one of the last things to do for a layer 0 attention is, is to multiply the weight matrix of the
+对于第0层，最后要做的一件事是，将权重矩阵相乘
 
 ```python
 w_layer0 = model["layers.0.attention.wo.weight"]
@@ -692,7 +719,7 @@ w_layer0.shape
 
     torch.Size([4096, 4096])
 
-### this is a simple linear layer, so we just matmul
+### 这是一个简单的线性层，所以我们只需要进行乘法运算
 
 ```python
 embedding_delta = torch.matmul(stacked_qkv_attention, w_layer0.T)
@@ -704,7 +731,7 @@ embedding_delta.shape
 <div>
     <img src="images/afterattention.png" width="600px"/>
 </div>
-we now have the change in the embedding value after attention, that should be adding to the original token embeddings
+注意之后，我们现在有了嵌入值的变化，应该将其添加到原始的 token embeddings 中
 
 ```python
 embedding_after_edit = token_embeddings_unnormalized + embedding_delta
@@ -713,7 +740,7 @@ embedding_after_edit.shape
 
     torch.Size([17, 4096])
 
-## we normalize and then run a feed forward neural network through the embedding delta
+## 我们将其归一化，然后运行一个前馈神经网络
 
 <div>
     <img src="images/norm_after.png" width="600px"/>
@@ -726,14 +753,15 @@ embedding_after_edit_normalized.shape
 
     torch.Size([17, 4096])
 
-## loading the ff weights and implementing the feed forward network
+## 加载 ff 权重并实现前馈网络
 
 <div>
     <img src="images/swiglu.png" width="600px"/>
 </div>
-in llama3, they used a SwiGLU feedforward network, this network architecture is really good at adding non linearity when needed by the model.
+在 llama3 中，他们使用了 SwiGLU 前馈网络，这种网络架构非常擅长非线性计算。
+
 <br>
-its pretty standard to use this feed forward network architecture in llms these days
+如今，在 LLMS 中使用这种前馈网络架构是相当常见的
 
 ```python
 w1 = model["layers.0.feed_forward.w1.weight"]
@@ -745,13 +773,13 @@ output_after_feedforward.shape
 
     torch.Size([17, 4096])
 
-# WE FINALLY HAVE NEW EDITED EMBEDDINGS FOR EACH TOKEN AFTER THE FIRST LAYER
+# 在第一层之后，我们终于为每个 token 编辑了新的 EMBEDDINGS
 
-just 31 more layers to go before we are done (one for loop away)
+离我们结束还剩 31 层（一层 for 循环）
 <br>
-you can imagine this edited embedding as having information about all queries asked on the first layer
+您可以将经过编辑的 embedding 想象为包含有关第一层上提出的所有 query 的信息
 <br>
-now each layer will encode more and more complex queries on the quesions asked, until we have an embedding that knows everything about the next token that we need.
+现在，对所有提出的问题每一层都会对 query 进行越来越复杂的编码，直到我们得到一个 embedding，其中包含了我们需要的下一个 token 的所有信息。
 
 ```python
 layer_0_embedding = embedding_after_edit+output_after_feedforward
@@ -760,15 +788,15 @@ layer_0_embedding.shape
 
     torch.Size([17, 4096])
 
-# god, everything all at once
+# 天啊，所有事情都碰到一起了
 
 <div>
     <img src="images/god.png" width="600px"/>
 </div>
-yep, this is it. everything we did before, all at once, for every single layer.
+现在就是这样。 之前为每一层所做的一切都需要一次性完成。
 <br>
 
-# have fun reading :)
+# 都到这里了，希望你能看的开心 :)
 
 ```python
 final_embedding = token_embeddings_unnormalized
@@ -817,9 +845,10 @@ for layer in range(n_layers):
     final_embedding = embedding_after_edit+output_after_feedforward
 ```
 
-# we now have the final embedding, the best guess the model could make about the next token
+# 我们现在有了最终的嵌入，模型可以对下一个 token 做出的最优猜测
 
 the shape of the embedding is the same as regular token embeddings [17x4096] where 17 is the number of tokens and 4096 is the embedding dim
+embedding 的 shape 与常规 token embedding [17x4096] 相同，其中 17 是 token 数量，4096 是 embedding 维度
 
 <div>
     <img src="images/last_norm.png" width="600px"/>
@@ -832,12 +861,12 @@ final_embedding.shape
 
     torch.Size([17, 4096])
 
-# finally, lets decode the embedding into the token value
+# 最后，我们将 embedding 解码为 token value 。
 
 <div>
     <img src="images/finallayer.png" width="600px"/>
 </div>
-we will use the output decoder to convert the final embedding into a token
+我们将使用输出解码器将最终 embedding 转换为 token。
 
 ```python
 model["output.weight"].shape
@@ -845,10 +874,11 @@ model["output.weight"].shape
 
     torch.Size([128256, 4096])
 
-# we use the embedding of the last token to predict the next value
+# 我们使用最后一个 token 的 embedding 来预测下一个值。
 
-hopefully in our case, 42 :)
+希望在我们预料之内, 42 :)
 note: 42 is the answer to "the answer to the ultimate question of life, the universe, and everything is ", according to the book "hitchhiker's guide to the galaxy", most mordern llms would answer with 42 here, which should validate our entire code! wish me luck :)
+注意：根据《银河系漫游指南》书中提到，“生命、宇宙和一切的终极问题的答案是 42 ” 。大多数现代语言模型在这里应该会回答 42，这应该能验证我们的整个代码！祝我好运 :)
 
 ```python
 logits = torch.matmul(final_embedding[-1], model["output.weight"].T)
@@ -857,9 +887,9 @@ logits.shape
 
     torch.Size([128256])
 
-### the model predicted token number 2983 as the next token, is this the token number for 42?
+### 模型预测的 token 编号是 2983，这是否代表 42 的 token 编号？
 
-IM HYPING YOU UP, this is the last cell of code, hopefully you had fun :)
+我在给你加油呐喊！这已经是代码的最后一部分了，希望你已经信心满满 :)
 
 ```python
 next_token = torch.argmax(logits, dim=-1)
@@ -868,7 +898,7 @@ next_token
 
     tensor(2983)
 
-# lets fucking go
+# 让我们搞起来!
 
 <div>
     <img src="images/42.png" width="600px"/>
@@ -880,26 +910,31 @@ tokenizer.decode([next_token.item()])
 
     '42'
 
-# thank you, i love you :)
+# 感恩, 爱你哟 :)
 
-This is the end. Hopefully you enjoyed reading it!
+这就是结尾了。希望你喜欢！
 
-If you want to support my work
+如果你想支持我的工作：
 
-1. follow me on twitter https://twitter.com/naklecha
-2. or, buy me a coffee [https://www.buymeacoffee.com/naklecha](https://www.buymeacoffee.com/naklecha)
+1. 在 Twitter 上关注我：https://twitter.com/naklecha
+2. 或者给我买杯咖啡：[https://www.buymeacoffee.com/naklecha](https://www.buymeacoffee.com/naklecha)
 
-Honestly, if you made it this far you already made my day :)
+说实话，如果你能到这一步，已经让我很开心了:)
 
-## what motivates me?
+## 我的动力是什么？
 
-My friends and I are on a mission - to make research more accessible!
-We created a research lab called A10 - [AAAAAAAAAA.org](http://aaaaaaaaaa.org/)
+我和我的朋友们有一个价值观 - 让研究更加易于理解！
 
-A10 twitter - https://twitter.com/aaaaaaaaaaorg
+我们创建了一个名为 A10 的研究实验室 - [AAAAAAAAAA.org](http://aaaaaaaaaa.org/)
 
-our thesis:
+我们的论文：
 
 <div>
     <img src="images/a10.png" width="600px"/>
 </div>
+
+# 中文翻译 (translate)
+
+@喻四先生
+
+![image](https://github.com/ActNotSign/llama3-from-scratch/assets/7576037/8d7972f8-07b2-41b7-b2a4-f1329c1bd80d)
